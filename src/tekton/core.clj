@@ -1,87 +1,63 @@
 (ns tekton.core
- (:require [clojure.data.json :as json]
-           [incanter.core :refer [$=]]))
+ (:require 
+  [tekton.geo :as geo]
+  [tekton.util :as util]
+  [tekton.interop :as interop]
+  [tekton.gcode :as gcode]
+  [tekton.vis :as vis]))
 
-(defn cart-add
-  [p1 p2]
-  (assoc p1
-   :x (+ (:x p1) (:x p2)) 
-   :y (+ (:y p1) (:y p2))))
+(def jittered-layer
+  (let [smooth-layer (interop/pts-from-gh)]
+    (update
+     smooth-layer
+     :jitter
+     (fn [pts] (geo/jitter pts (fn [x] (= 0 (mod (+ x 2) 3))) {:x -2 :y -2})))))
 
-(defn jitter [pts pick-index-fn offset]
-  (map-indexed (fn [pti pt]
-                 (if (pick-index-fn pti)
-                     (cart-add pt offset)
-                     pt)) pts))
+(defn jittered-layer-2 [initial-counter]
+ (let [smooth-layer (interop/pts-from-gh)]
+     (update
+      smooth-layer
+      :jitter
+      (fn [pts] 
+        (loop [result []
+               counter initial-counter
+               reverse false
+               current-point (first pts)
+               rest-of-points (drop 1 pts)]
+          (if (empty? rest-of-points)
+            result
+            (recur
+             ;; result
+             (conj result 
+               (cond (or (= counter 1) (= counter 3))
+                     (geo/cart-add current-point {:x -2 :y -2})
+                     (= counter 2)
+                     (geo/cart-add current-point {:x -4 :y -4})
+                     :else
+                     current-point))
+             ;; counter
+             (if reverse (- counter 1) (+ counter 1))
+             ;; reverse
+             (if (or (<= counter 0) (>= counter 4)) (not reverse) reverse)
+             ;; current-point
+             (first rest-of-points)
+             ;; rest-of-points
+             (drop 1 rest-of-points))))))))
 
-(defn jitter-perimeter [ly pick-index-fn offset]
-  (assoc ly :perimeter (jitter (:perimeter ly) pick-index-fn offset)))
+(def layer-pattern
+  (let [smooth-layer (interop/pts-from-gh)]
+   (cycle [smooth-layer smooth-layer jittered-layer])))
 
-(def pts-in
- ;; points read in from json file outta grasshopper
- (with-open [reader (clojure.java.io/reader "pts.json")]
-   (json/read reader)))
-      
-(defn parse-pt [pt] {:x (pt "X") :y (pt "Y")})
+(def layer-pattern-2
+  (let [smooth-layer (interop/pts-from-gh)]
+   (cycle [smooth-layer smooth-layer (jittered-layer-2 0) smooth-layer smooth-layer (jittered-layer-2 2)])))
 
-(def parsed-pts
-  {:perimeter (map parse-pt (pts-in "perimeter"))
-   :interior (map parse-pt (pts-in "interior"))})
+(def a-shape (take 10 layer-pattern))
 
-(def a-shape
-   (for [z (range 0 100 1.75)]
-     {:perimeter (map #(assoc % :z z) (:perimeter parsed-pts))
-      :interior (map #(assoc % :z z) (:interior parsed-pts))}))
-
-(def my-shape
-   (->> a-shape
-       (map-indexed (fn [li ly]
-                     (cond
-                      (= 0 (mod (+ li 1) 3))
-                      (jitter-perimeter ly (fn [x] (= 0 (mod (+ x 2) 3))) {:x 2 :y 2})
-                      :else
-                      ly)))))
-
-;; (def my-shape
-;;    (->> a-shape
-;;        (map-indexed (fn [li ly]
-;;                      (if (= 0 (mod (+ li 1) 3))
-;;                        (jitter-perimeter ly (fn [x] (= 0 (mod (+ x 5) 3))) {:x 2 :y 2})
-;;                        ly)))
-;;        (map-indexed (fn [li ly]
-;;                      (if (= 0 (mod (+ li 4) 6))
-;;                        (jitter-perimeter ly (fn [x] (= 0 (mod (+ x 2) 3))) {:x 2 :y 2})
-;;                        ly)))))
-
-(defn update-keyed-in [xs key fn]
-    (map #(update-if-keyed % key fn) xs))
-
-(defn update-if-keyed [x key fn]
-    (if (has-key x key)
-      (update x key fn)
-      x))
-
-(defn has-key [x key] (boolean (key x)))
-
-(defn clay-printer [shape x-offset y-offset z-offset]
-  (->> shape
-       (map (fn [ly] (concat (:perimeter ly) (:interior ly))))
-       (apply concat)
-       (map (fn [pt]
-              (let [x (+ (:x pt) x-offset)
-                    y (+ (:y pt) y-offset)
-                    z (+ (:z pt) z-offset)]
-                   (str "G1"
-                        " X" x
-                        " Y" y
-                        " Z" z
-                        " F1000\n"))))
-       (apply str)
-       (#(str "G28 X Y Z\n"
-              "G90\n"
-              %
-              "G28 X"))))
-       
 (spit 
  "3dprint.gcode"
- (clay-printer my-shape 40 40 2))
+ (gcode/clay-printer (util/take-to-height layer-pattern 150 1.75) 40 40 1.75))
+
+;; (vis/shape->json (util/take-to-height layer-pattern 150 1.75))
+
+(vis/render-shape (util/take-to-height layer-pattern 150 1.75))
